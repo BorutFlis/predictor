@@ -17,7 +17,6 @@ import timeit
 
 
 def expected_value(odds,prob):
-
     return (odds-1)*prob-(1-prob)
 
 
@@ -35,6 +34,27 @@ def over_under_value_bet(files):
      
     for vb in value_bets:
         print(vb)
+
+def week_analysis(w_p, all_df):
+    #we go through the predictions of the previous week where we fill the queues
+    #for i,game in w_p.iterrows():
+        #difference=game['home_total_goal_count']-game['away_total_goal_count']
+    w_p=w_p[['home_team_name', 'away_team_name','predicted_result','predicted_over']].copy()
+    #merging previous week predictions with all the games
+    w_pm = w_p.merge(all_df, on=['home_team_name', 'away_team_name'])
+    #this code is only used for the slovenian league because it has 4 games between teams, in second half of season I will have to change to keep="last"
+    w_pm = w_pm.drop_duplicates(subset=['home_team_name', 'away_team_name'],keep='first')
+    accuracy,accuracy_over25,precisions= analysis_of_predictions(w_pm)
+    #TODO: this calculations can throw division by zero error I need to handle this
+    print("Our prediction accuracy: ", accuracy[0],accuracy[1],accuracy[0]/accuracy[1])
+    print("Our over 2.5 accuracy: ", accuracy_over25[0],accuracy_over25[1],accuracy_over25[0]/accuracy_over25[1])
+    print("predicted 1 precision",precisions[0][0],precisions[0][1],(precisions[0][0]/precisions[0][1]) if precisions[0][1] else 0)
+    print("predicted 2 precision", precisions[1][0], precisions[1][1], (precisions[1][0] / precisions[1][1]) if precisions[1][1] else 0)
+    print("predicted 0 precision", precisions[2][0], precisions[2][1], (precisions[2][0] / precisions[2][1]) if precisions[2][1] else 0)
+    print("predicted over 25 precision", precisions[3][0], precisions[3][1], (precisions[3][0] / precisions[3][1]) if precisions[3][1] else 0)
+    print("predicted under 25 precision", precisions[4][0], precisions[4][1], (precisions[4][0] / precisions[4][1]) if precisions[4][1] else 0 )
+    return w_pm
+
 
 def analysis_of_predictions(w_pm):
     #TODO make function so you can use it all the time
@@ -54,7 +74,7 @@ def analysis_of_predictions(w_pm):
     pr25_2=sum(w_pm['predicted_over'] == 2)
     return (correct, predicted),(correct25,predicted),[(sum(condition1),pr_1),(sum(condition2),pr_2),(sum(condition0),pr_0),(sum(condition25_1),pr25_1),(sum(condition25_2),pr25_2)]
 
-def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4):
+def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4,expected_games=34):
     # we define today's date as the default the games in this round are going to be in three days after this date: friday, Saturday, Sunday, Monday
     #we initialize two lists to hold the dataframes of all the leagues all_dfs(all Games) dfs(games playing this weekend)
     all_dfs=[]
@@ -65,12 +85,12 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4):
     for f in files:
         ndf=pd.read_csv(f,na_values=[""],parse_dates=['date_GMT'])
         all_dfs.append(ndf)
-        ndf=ndf[(ndf['date_GMT']>=today) & (ndf['date_GMT']<(today+ datetime.timedelta(days=n_days)))]
+        ndf=ndf[(ndf['date_GMT']>=(today)) & (ndf['date_GMT']<(today+ datetime.timedelta(days=n_days)))]
         dfs.append(ndf)
     df = pd.concat(dfs, ignore_index=True)
     all_df=pd.concat(all_dfs, ignore_index=True)
     #we check if the df containing the games we will predict has 34 games(serie A 10, EPL 10, Bundesliga 9, Prvaliga 5)
-    if len(df)!=34:
+    if len(df)!=expected_games:
         print("there is an unusual number of games:",len(df))
         #ask if we wish to continue we can check in this time what was so unusual
         p_result = input("do you wish to continue y/n:")
@@ -86,6 +106,7 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4):
         queues[attr[2]]=dict()
     os.chdir(os.path.dirname(sys.argv[0])+"\\weekend\\previous_seasons")
     previous_seasons = glob.glob("*stats.csv")
+    #TODO: I can add a function that deals with getting all the queues from the previous season, to avoid duplicate coding of for loops
     for season in previous_seasons:
         #we have to deal with all the attributes, they come in tuples (home attr, away attr, name attr, lenght of queue)
         for attr in display_attrs:
@@ -98,7 +119,8 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4):
         # we define the new columns
         all_df.loc[:, 'home_' + attr[2] + '_pre_game'] = pd.Series(None, index=all_df.index)
         all_df.loc[:, 'away_' + attr[2] + '_pre_game'] = pd.Series(None, index=all_df.index)
-    football.go_through_season(all_df,display_attrs,queues)
+    #Queues is a mutable object so the changes get altered without new assignment
+    football.go_through_season(all_df,display_attrs,queues)#TODO: test if the queues really get update
     """"
     #we go through all the games that all ready happened this season to fill up the queues
     for index, game in all_df[all_df['status']=="complete"].iterrows():
@@ -119,45 +141,30 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4):
                     teams[game[ha + '_team_name']].append(game[haattr])
     """
     os.chdir('..')
-    if False:#TODO: I need to code in such a way that it does not execute if the file weekly predictions does not exists, even better make your own function so you can check accuracy anytime you want
-        #we open the file that has the predictions of the previous week
-        w_p=pd.read_csv("weekly_predictions.csv",na_values=[""],parse_dates=['date_GMT'])
-        #we go through the predictions of the previous week where we fill the queues
-        #for i,game in w_p.iterrows():
-            #difference=game['home_total_goal_count']-game['away_total_goal_count']
-        w_p=w_p[['home_team_name', 'away_team_name','predicted_result','predicted_over']].copy()
-        #merging previous week predictions with all the games
-        w_pm = w_p.merge(all_df, on=['home_team_name', 'away_team_name'])
-        #this code is only used for the slovenian league because it has 4 games between teams, in second half of season I will have to change to keep="last"
-        w_pm = w_pm.drop_duplicates(subset=['home_team_name', 'away_team_name'],keep='first')
-        accuracy,accuracy_over25,precisions= analysis_of_predictions(w_pm)
-        #TODO: this calculations can throw division by zero error I need to handle this
-        print("Our prediction accuracy: ", accuracy[0],accuracy[1],accuracy[0]/accuracy[1])
-        print("Our over 2.5 accuracy: ", accuracy_over25[0],accuracy_over25[1],accuracy_over25[0]/accuracy_over25[1])
-        print("predicted 1 precision",precisions[0][0],precisions[0][1],precisions[0][0]/precisions[0][1])
-        print("predicted 2 precision", precisions[1][0], precisions[1][1], precisions[1][0] / precisions[1][1])
-        print("predicted 0 precision", precisions[2][0], precisions[2][1], precisions[2][0] / precisions[2][1])
-        print("predicted over 25 precision", precisions[3][0], precisions[3][1], precisions[3][0] / precisions[3][1])
-        print("predicted under 25 precision", precisions[4][0], precisions[4][1], precisions[4][0] / precisions[4][1])
-        #we do not need the dataframe that has all the games anymore
-        del all_df
+    #we open the file that has the predictions of the previous week
+    w_p=pd.read_csv("weekly_predictions.csv",na_values=[""],parse_dates=['date_GMT'])
+    w_pm= week_analysis(w_p,all_df)
 
-        # we open the file with all predictions to which we will add last weeks' predictions
-        try:
-            all_p = pd.read_csv("all_predictions.csv", na_values=[""], parse_dates=['date_GMT'])
-        #if there is no file with this name we try to catch the exception and create a new dataframe.
-        except FileNotFoundError:
-            all_p=pd.DataFrame()
+    #we do not need the dataframe that has all the games anymore
+    del all_df
 
-        all_p = all_p.append(w_pm)
-        all_p.to_csv('all_predictions.csv')
+    # we open the file with all predictions to which we will add last weeks' predictions
+    try:
+        all_p = pd.read_csv("all_predictions.csv", na_values=[""], parse_dates=['date_GMT'])
+    #if there is no file with this name we try to catch the exception and create a new dataframe.
+    except FileNotFoundError:
+        all_p=pd.DataFrame()
+
+    all_p = all_p.append(w_pm)
+    all_p.to_csv('all_predictions.csv')
 
     predicted_result=[]
     predicted_over=[]
     #we reset the index because our df is made from multiple dataFrames
     df=df.reset_index(drop=True)
     #we load the data on which we will train the classifiers         \
-    classifier_data = Orange.data.Table(os.path.dirname(sys.argv[0])+"/test/classifier.tab")
+    classifier_data = Orange.data.Table(os.path.dirname(sys.argv[0])+"//classifier.tab")
+
     #we create and train the two best models
     learner_nb = Orange.classification.NaiveBayesLearner()
     learner_rf= Orange.classification.RandomForestLearner()
@@ -186,11 +193,15 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4):
         # we print the predictions of Orange classifier which we previously determined as the best ones.
 
         classifier_nb(new_inst)
-        #TODO: Change so that it will be 1,0,2
-        print("{0:45s} {1:8d} ".format("Naive Bayes predicted class: ", classifier_nb(new_inst)[0]))
-        print("{0:45s} {1:8.2f} {2:8.2f} {3:8.2f}".format("Naive Bayes predictions (0,1,2): ",*classifier_nb(new_inst,1)[0]))
-        print("{0:45s} {1:8.0f} ".format("Random Forest predicted class: ", classifier_rf(new_inst)[0]))
-        print("{0:45s} {1:8.2f} {2:8.2f} {3:8.2f}".format("Random Forest predictions (0,1,2): ",*classifier_rf(new_inst,1)[0]))
+        #TODO: Change so that it will be 1,0,2 use map
+        print("{0:45s} {1:8d} ".format("Naive Bayes predicted class: ", classifier_nb(new_inst)))
+        probs_nb=list(classifier_nb(new_inst,1))
+        probs_nb[0],probs_nb[1]=probs_nb[1],probs_nb[0]
+        print("{0:45s} {1:8.2f} {2:8.2f} {3:8.2f}".format("Naive Bayes predictions (1,0,2): ",*probs_nb))
+        print("{0:45s} {1:8.0f} ".format("Random Forest predicted class: ", classifier_rf(new_inst)))
+        probs_rf=list(classifier_rf(new_inst,1))
+        probs_rf[0],probs_rf[1]=probs_rf[1], probs_rf[0]
+        print("{0:45s} {1:8.2f} {2:8.2f} {3:8.2f}".format("Random Forest predictions (1,0,2): ",*probs_rf))
         p_result = input('Who will win: ')
         predicted_result.append(p_result)
         p_over = input('1- Over 2.5 / 2- Under 2.5: ')
@@ -215,8 +226,14 @@ def daily_odds():
 #  matchday_file=files[-1]
 
 if __name__ == '__main__':
-    df=weekend_prediction(football.game_attributes.attrs,today=datetime.datetime.today(), n_days=6)
+    #df=weekend_prediction(football.game_attributes.attrs,today=(datetime.datetime.today()-datetime.timedelta(days=1)), n_days=3,expected_games=9)
     #daily_odds()
+    #all_df = pd.read_csv("weekend/germany-bundesliga-matches-2019-to-2020-stats.csv",na_values=[""],parse_dates=['date_GMT'])
+    #w_p=pd.read_csv("weekend/all_predictions.csv",na_values=[""],parse_dates=['date_GMT'])
+    #week_analysis(w_p,all_df)
+    #os.chdir("classifier/germany")
+    #seasons=os.listdir()
+    #football.data_for_classifier(seasons[0],seasons[1:football.])
 
 #df=pd.read_csv("classifier/italy-serie-a-matches-2017-to-2018-stats.csv",na_values=[""],parse_dates=['date_GMT'])
 #df1=pd.read_csv("classifier/italy-serie-a-matches-2016-to-2017-stats.csv",na_values=[""],parse_dates=['date_GMT'])
