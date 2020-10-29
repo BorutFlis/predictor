@@ -8,7 +8,10 @@ import sys
 import glob
 import pandas as pd
 import datetime
-import football
+
+from football import CreateDataset as CD
+from download import SeleniumConnect
+from football import game_attributes
 import collections
 import numpy as np
 import Orange
@@ -81,7 +84,13 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4,e
     dfs=[]
     os.chdir("weekend")
     files = glob.glob("*stats.csv")
-
+    for f in files:
+        os.remove(f)
+    os.chdir("..")
+    sc=SeleniumConnect()
+    sc.download_files()
+    os.chdir("weekend")
+    files = glob.glob("*stats.csv")
     for f in files:
         ndf=pd.read_csv(f,na_values=[""],parse_dates=['date_GMT'])
         all_dfs.append(ndf)
@@ -104,7 +113,7 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4,e
     #we have to define dictionary keys before because we have multiple leagues
     for attr in display_attrs:
         queues[attr[2]]=dict()
-    os.chdir(os.path.dirname(sys.argv[0])+"\\weekend\\previous_seasons")
+    os.chdir("previous_seasons")
     previous_seasons = glob.glob("*stats.csv")
     #TODO: I can add a function that deals with getting all the queues from the previous season, to avoid duplicate coding of for loops
     for season in previous_seasons:
@@ -112,39 +121,19 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4,e
         for attr in display_attrs:
             #we have multiple leagues so we have to merge the queues in one dictionary
             queue_length=attr[4] if len(attr)>4 else None
-            league_queue=football.make_attribute_queue(attr,season,queue_length)
+            league_queue=CD.make_attribute_queue(attr,season,queue_length)
     #relegated_teams=football.get_relegated_teams(teams,eue([attr[0],attr[1]],season,queue_length)
             queues[attr[2]].update(league_queue) #I am not sure I even need to take care of relegated teams
-    for attr in display_attrs:
-        # we define the new columns
-        all_df.loc[:, 'home_' + attr[2] + '_pre_game'] = pd.Series(None, index=all_df.index)
-        all_df.loc[:, 'away_' + attr[2] + '_pre_game'] = pd.Series(None, index=all_df.index)
     #Queues is a mutable object so the changes get altered without new assignment
-    football.go_through_season(all_df,display_attrs,queues)#TODO: test if the queues really get update
-    """"
-    #we go through all the games that all ready happened this season to fill up the queues
-    for index, game in all_df[all_df['status']=="complete"].iterrows():
-        #we go through all the attributes we want to update
-        for attr in display_attrs:
-            teams = queues[attr[2]]
-            # we go through an additional for loop to account for the home and away team
-            for ha, haattr in [('home', attr[0]), ('away', attr[1])]:
-                if game[ha + '_team_name'] not in teams:
-                    #we calculate the queue length, we have to do this because different leagues have a different number of games
-                    queue_length = sum(all_df['away_team_name']==game[ha + '_team_name']) + sum(all_df['home_team_name']==game[ha + '_team_name'])
-                    teams[game[ha + '_team_name']] = collections.deque(maxlen=queue_length)
-                    #for the promoted teams we do not have data so we add the average predefined in attr[3]
-                    for i in range(queue_length-1):
-                        teams[game[ha + '_team_name']].append(attr[3])
-                    teams[game[ha + '_team_name']].append(game[haattr])
-                else:
-                    teams[game[ha + '_team_name']].append(game[haattr])
-    """
-    os.chdir('..')
+    CD.go_through_season_apply(all_df,display_attrs,queues)#TODO: test if the queues really get update
+    os.chdir('..\\..')
     #we open the file that has the predictions of the previous week
-    w_p=pd.read_csv("weekly_predictions.csv",na_values=[""],parse_dates=['date_GMT'])
-    w_pm= week_analysis(w_p,all_df)
-
+    try:
+        w_p=pd.read_csv("weekly_predictions.csv",na_values=[""],parse_dates=['date_GMT'])
+        w_pm= week_analysis(w_p,all_df)
+    #if there is no file with this name we try to catch the exception and create a new dataframe.
+    except FileNotFoundError:
+        pass
     #we do not need the dataframe that has all the games anymore
     del all_df
 
@@ -155,15 +144,16 @@ def weekend_prediction(display_attrs,today= datetime.datetime.today(),n_days=4,e
     except FileNotFoundError:
         all_p=pd.DataFrame()
 
-    all_p = all_p.append(w_pm)
-    all_p.to_csv('all_predictions.csv')
+    if 'w_pm' in locals():
+        all_p = all_p.append(w_pm)
+        all_p.to_csv('all_predictions.csv')
 
     predicted_result=[]
     predicted_over=[]
     #we reset the index because our df is made from multiple dataFrames
     df=df.reset_index(drop=True)
     #we load the data on which we will train the classifiers         \
-    classifier_data = Orange.data.Table(os.path.dirname(sys.argv[0])+"//classifier.tab")
+    classifier_data = Orange.data.Table("classifier.tab")
 
     #we create and train the two best models
     learner_nb = Orange.classification.NaiveBayesLearner()
@@ -225,7 +215,6 @@ def daily_odds():
 #files.sort(key=os.path.getmtime)
 #  matchday_file=files[-1]
 
-if __name__ == '__main__':
     #df=weekend_prediction(football.game_attributes.attrs,today=(datetime.datetime.today()-datetime.timedelta(days=1)), n_days=3,expected_games=9)
     #daily_odds()
     #all_df = pd.read_csv("weekend/germany-bundesliga-matches-2019-to-2020-stats.csv",na_values=[""],parse_dates=['date_GMT'])

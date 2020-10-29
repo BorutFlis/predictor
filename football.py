@@ -67,7 +67,7 @@ class Helpers:
                     queues[attr[2]][t].append(attr[3])
 
 class Dump:
-
+    @staticmethod
     def go_through_season(ns, new_attrs, queues):
         ns=ns[ns['status']=='complete']
         #the condition status == complete is here because we want to go only through the games that have already been played, but we still need the other games to calucalte length_of_queue
@@ -434,7 +434,8 @@ class CreateDataset(Helpers):
             CreateDataset.__instance = self
             self.data_location=data_location
 
-    def make_attribute_queue(self,attr,season,queue_length=None):
+    @staticmethod
+    def make_attribute_queue(attr,season,queue_length=None):
         #TODO: it is probably very inefficient to iterate for every attribute
         teams=dict()
         s=pd.read_csv(season,na_values=[""],parse_dates=['date_GMT'])
@@ -506,7 +507,7 @@ class CreateDataset(Helpers):
         ns = ns[ns['status'] == 'complete']
         #attr=('home_team_possession', 'away_team_possession', 'average_possession', 45, 38)
         #teams=queues[attr[2]]
-        Helpers.fill_up_promoted_teams(Helpers.get_promoted_teams(queues["goals_scored"],ns),new_attrs,queues,38)
+        Helpers.fill_up_promoted_teams(Helpers.get_promoted_teams(queues["total_goal_count"],ns),new_attrs,queues,38)
         for attr in new_attrs:
             #we insert two new columns, where we will insert the new data
             ns.insert(len(ns.columns), 'home_' + attr[2] + '_pre_game', pd.Series())
