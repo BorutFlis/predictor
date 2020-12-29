@@ -8,6 +8,7 @@ import pandas as pd
 import datetime
 import math
 import statsmodels.api as sm
+import pdb
 import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import os
@@ -24,9 +25,97 @@ from geopy.distance import geodesic
 import pickle
 import mysql.connector
 from sqlalchemy import create_engine
+from sklearn.ensemble import RandomForestClassifier
+from copy import deepcopy
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import mean_squared_error,r2_score
+import xgboost as xgb
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from scipy.stats import poisson
 
+
+class PoissonModel:
+
+    def __init__(self, home_dict={'home_team_name':'team', 'away_team_name':'opponent','home_team_goal_count':'goals'}, away_dict={'away_team_name':'team', 'home_team_name':'opponent','away_team_goal_count':'goals'}):
+        self.home_dict=home_dict
+        self.away_dict=away_dict
+        self.classes=["home_win","draw","away_win"]
+
+    def fit(self,df):
+        goal_model_data = pd.concat([
+            df[['home_team_name', 'away_team_name', 'home_team_goal_count']].assign(home=1).rename(columns=self.home_dict),
+                df[['home_team_name', 'away_team_name', 'away_team_goal_count']].assign(home=0).rename(columns=self.away_dict)])
+        self.model=smf.glm(formula="goals ~ home + team + opponent", data=goal_model_data,family=sm.families.Poisson()).fit()
+
+    def avg_prediction(self,homeTeam,awayTeam):
+        home_goals_avg = self.model.predict(pd.DataFrame(data={'team': homeTeam,
+                                                               'opponent': awayTeam, 'home': 1},
+                                                         index=[1])).values[0]
+        away_goals_avg = self.model.predict(pd.DataFrame(data={'team': awayTeam,
+                                                               'opponent': homeTeam, 'home': 0},
+                                                         index=[1])).values[0]
+        return {"home_pred":home_goals_avg, "away_pred":away_goals_avg}
+
+    def predict_proba(self,df):
+        pred_avg=  df.apply(lambda x: self.avg_prediction(x["home_team_name"],x["away_team_name"]),axis=1,result_type="expand")
+        df=pd.concat([df,pred_avg],axis=1)
+        final_predictions=[]
+        for i,row in df.iterrows():
+            team_pred = [[poisson.pmf(i, team_avg) for i in range(0, 7)] for team_avg in [row["home_pred"], row["away_pred"]]]
+            prob_matrix=(np.outer(np.array(team_pred[0]), np.array(team_pred[1])))
+            h_prob=np.sum(np.tril(prob_matrix, -1))
+            draw_prob=np.sum(np.diag(prob_matrix))
+            a_prob=np.sum(np.triu(prob_matrix, 1))
+            final_predictions.append([h_prob,draw_prob,a_prob])
+        return pd.DataFrame(final_predictions,columns=self.classes)
 
 class Helpers:
+
+    @staticmethod
+    def update_winnings_25(x,teams):
+        teams[x["home_team_name"]] += (x["odds_ft_over25"] - 1) if x["total_goal_count"] > 2 else -1
+        teams[x["away_team_name"]] += (x["odds_ft_over25"] - 1) if x["total_goal_count"] >2 else -1
+
+    @staticmethod
+    def update_winnings(x,teams):
+        teams[x["home_team_name"]] += (x["odds_ft_home_team_win"] - 1) if x["home_team_goal_count"] > x["away_team_goal_count"] else -1
+        teams[x["away_team_name"]] += (x["odds_ft_away_team_win"] - 1) if x["home_team_goal_count"] < x["away_team_goal_count"] else -1
+
+    @staticmethod
+    def update_odds_ratio(x,teams):
+        teams[x["home_team_name"]].append(1/x["odds_ft_home_team_win"])
+        teams[x["away_team_name"]].append(1/x["odds_ft_away_team_win"])
+
+    @staticmethod
+    def update_inverted_total_odds(x, teams):
+        teams[x["home_team_name"]].append(1/x["odds_ft_home_team_win"]+1/x["odds_ft_away_team_win"]+1/x["odds_ft_draw"])
+        teams[x["away_team_name"]].append(1/x["odds_ft_away_team_win"]+1/x["odds_ft_home_team_win"]+1/x["odds_ft_draw"])
+
+    @staticmethod
+    def betting_accuracy(df,predict_df):
+        clf = RandomForestClassifier(max_depth=2, random_state=0)
+        clf.fit(df.iloc[:, -21:-1], df.iloc[:, -1])
+        prob_df = pd.DataFrame(clf.predict_proba(predict_df.iloc[:, -21:-1]), columns=clf.classes_)
+        predict_df = pd.concat([predict_df, prob_df], axis=1)
+        predict_df[["bet_win", "bet_draw", "bet_away"]] = \
+            predict_df.apply( \
+                lambda x: [x["win"] * (x["odds_ft_home_team_win"] - 1) - (1 - x["win"]), \
+                           x["draw"] * (x["odds_ft_draw"] - 1) - (1 - x["draw"]), \
+                           x["loss"] * (x["odds_ft_away_team_win"] - 1) - (1 - x["loss"])], axis=1,
+                result_type="expand")
+        max_ev = predict_df.iloc[:, -3:].max(axis=1)
+        bet = predict_df.iloc[:, -3:].idxmax(axis=1)
+        predict_df.insert(len(predict_df.columns), "max_ev", max_ev)
+        predict_df.insert(len(predict_df.columns), "bet", bet)
+        translate_dict = {"bet_win": ["win", "odds_ft_home_team_win"], "bet_draw": ["draw", "odds_ft_draw"],
+                          "bet_away": ["loss", "odds_ft_away_team_win"]}
+        predict_df["prob"] = predict_df.apply(lambda x: x[translate_dict[x["bet"]][0]], axis=1)
+        predict_df["odds"] = predict_df.apply(lambda x: x[translate_dict[x["bet"]][1]], axis=1)
+        predict_df["bet"] = predict_df.apply(lambda x: x["bet"].split("_")[1], axis=1)
+        return predict_df[predict_df.max_ev.gt(0)].apply(lambda x:  x["odds"]-1 if x["results"]==x["bet"] else -1,axis=1).sum()
+
 
     @staticmethod
     def expected_value(odds,prob):
@@ -59,12 +148,30 @@ class Helpers:
 
     @staticmethod
     def fill_up_promoted_teams(teams,attrs,queues,queue_length):
+        #On the basis of different season length this function assumes it is conducted on one country
         for attr in attrs:
             for t in teams:
-                length_of_queue = attr[4] if len(attr) > 4 else queue_length
+                length_of_queue = attr[4] if attr[4] else queue_length
+                if isinstance(length_of_queue,float):
+                    pdb.set_trace()
                 queues[attr[2]][t]=collections.deque(maxlen=length_of_queue)
-                for i in range(queue_length):
+                for i in range(length_of_queue):
                     queues[attr[2]][t].append(attr[3])
+
+    @staticmethod
+    def convert_added_time(s):
+        if type(s)==str:
+            numbers = re.findall(r'\d+', s)
+            if len(numbers)>1:
+                #added in the first half we count as minute 45
+                if int(numbers[0])==45:
+                    return 45
+                else:
+                    return (sum(map(int, numbers)))
+            else:
+                return int(numbers[0])
+        else:
+            return None
 
 class Dump:
     @staticmethod
@@ -144,6 +251,44 @@ class Dump:
         return df
 
 class Exploration(Helpers):
+
+    @staticmethod
+    def xgboost_regression():
+        df=pd.read_csv("classifier_country.csv",index_col=0)
+        enc = OneHotEncoder(handle_unknown='ignore')
+        one_hot = enc.fit_transform(df.iloc[:, [-2]])
+        one_hot_df = pd.DataFrame(one_hot.toarray())
+        for c in one_hot_df.columns:
+            df.insert(len(df.columns) - 2, "country_" + str(c), one_hot_df.loc[:, c])
+
+        df.drop("country", inplace=True, axis=1)
+        X_train, X_test, y_train, y_test = train_test_split(df.iloc[:, -26:-1], df["odds_ft_home_team_win"],
+                                                            test_size=0.33, random_state=42)
+        param = {
+            'eta': 0.3,
+            'max_depth': 3,
+            'objective': 'reg:squarederror'
+        }
+        D_train = xgb.DMatrix(X_train, label=y_train)
+        D_test = xgb.DMatrix(X_test, label=y_test)
+        num_round = 10
+        bst = xgb.train(param, D_train, num_round)
+        preds = bst.predict(D_test)
+        print("MSE = {}".format(mean_squared_error(y_test, preds)))
+        print("R2 = {}".format(r2_score(y_test, preds)))
+
+
+    @staticmethod
+    def team_season_winnings(file_location,helper_function,initial):
+        df = pd.read_csv(file_location)
+        if df["odds_ft_home_team_win"].isna().any() or df["odds_ft_home_team_win"].eq(0).any() or df["odds_ft_over25"].eq(0).any():
+            print(file_location," lacks odds")
+            return dict()
+        m= re.search("(\d{4}\-to\-\d{4})", file_location)
+        teams = {k: deepcopy(initial) for k in df.home_team_name.unique()}
+        df.apply(lambda x: helper_function(x,teams), axis=1)
+        return {k+" "+m.groups()[0]:v for k,v in teams.items()}
+
 
     def homeaway_analysis(file_name, team_name):
         df = pd.read_csv(file_name, na_values=[""])
@@ -338,9 +483,9 @@ class TemporalExploration:
         a_goal_minutes = a_goal_minutes.fillna("0")
         # Handling the minutes in stoppage time like 90'4
         for c in h_goal_minutes.columns:
-            h_goal_minutes[c] = h_goal_minutes[c].apply(lambda x: convert_added_time(x))
+            h_goal_minutes[c] = h_goal_minutes[c].apply(lambda x: Helpers.convert_added_time(x))
         for c in a_goal_minutes.columns:
-            a_goal_minutes[c] = a_goal_minutes[c].apply(lambda x: convert_added_time(x))
+            a_goal_minutes[c] = a_goal_minutes[c].apply(lambda x: Helpers.convert_added_time(x))
         # goal_minutes = df['home_team_goal_timings'].str.split(',', expand=True)
         # goal_minutes['away_team_goal_timings'] = df['away_team_goal_timings'].str.split(',', expand=True)
         # the games that end with more then 25 goals in a boolean array
@@ -405,16 +550,6 @@ class FeatureEngineering:
         # df=add_result_column(df)
         df.to_csv("england_types.csv")
 
-    def convert_added_time(s):
-        numbers = re.findall(r'\d+', s)
-        if len(numbers)>1:
-            #added in the first half we count as minute 45
-            if int(numbers[0])==45:
-                return 45
-            else:
-                return (sum(map(int, numbers)))
-        else:
-            return int(numbers[0])
 
 class CreateDataset(Helpers):
     __instance = None
@@ -426,13 +561,36 @@ class CreateDataset(Helpers):
             CreateDataset()
         return CreateDataset.__instance
 
-    def __init__(self,data_location):
+    def __init__(self,data_location="classifier"):
         """ Virtually private constructor. """
         if CreateDataset.__instance != None:
             raise Exception("This class is a singleton!")
         else:
             CreateDataset.__instance = self
             self.data_location=data_location
+
+    @staticmethod
+    def make_attribute_queue_apply(df,attrs,queues={}):
+        n_unique_teams=len(set(df["home_team_name"].unique()).intersection(df["away_team_name"].unique()))
+        games_in_season = (n_unique_teams-1) * 2
+        for attr in attrs:
+            if attr[2] not in queues:
+                queue_length = attr[4] if attr[4] else games_in_season
+                queues[attr[2]] = {\
+                    team: collections.deque(maxlen=int(queue_length)) for team in df["home_team_name"].unique()\
+                }
+            if len(attr)>5:
+                lmbd=attr[5]
+                df.apply(lambda row: \
+                             CreateDataset.attr_iter(row['home_team_name'], row['away_team_name'],\
+                                                     lmbd(*[row[at] for at in attr[0]]),\
+                                                     lmbd(*[row[at] for at in attr[1]]), queues, attr[2], return_values=False), \
+                         axis=1, result_type='expand')
+            else:
+                df.apply(lambda row:\
+                    CreateDataset.attr_iter(row['home_team_name'], row['away_team_name'], row[attr[0]],row[attr[1]], queues, attr[2],return_values=False),\
+                axis=1)
+        return queues
 
     @staticmethod
     def make_attribute_queue(attr,season,queue_length=None):
@@ -467,10 +625,8 @@ class CreateDataset(Helpers):
         #we intialize the dictionary of all the attributes that we will keep queues for
         queues=dict()
         #we iterate through all the attributes we want to add, makes attribute queues from previous seasons
-        for attr in new_attrs:
-            length_of_queue=attr[4] if len(attr)>4 else None
-            teams=self.make_attribute_queue(attr,season_before,length_of_queue)
-            queues[attr[2]]=teams
+        ps_df=pd.read_csv(season_before, na_values=[""], parse_dates=['date_GMT'])
+        self.make_attribute_queue_apply(ps_df,new_attrs,queues)
         #we intialize the dataframe that will carry games from all of the seasons
         #df=pd.DataFrame()
         all_dfs=[]
@@ -479,64 +635,87 @@ class CreateDataset(Helpers):
             ns = pd.read_csv(season, na_values=[""], parse_dates=['date_GMT'])
 
             # we delete all the teams that were relegated the previous season. The variable teams is defined in the for loop maybe not the best coding
-            relegated_teams =self.get_relegated_teams(teams,ns)
+            relegated_teams =self.get_relegated_teams(queues["total_goal_count"],ns)
             for attr in new_attrs:
                 teams = queues[attr[2]]
                 #we delete the relegated teams from each specfic attribute
                 for rt in relegated_teams:
                     del teams[rt]
-
-            ns,queues= CreateDataset.go_through_season_apply(ns,new_attrs,queues)
+            queue_length=len(ns["home_team_name"].unique())*2
+            Helpers.fill_up_promoted_teams(Helpers.get_promoted_teams(queues["total_goal_count"], ns), new_attrs,queues, queue_length)
+            ns= CreateDataset.go_through_season_apply(ns,new_attrs,queues)
 
             #we append the modified ns to dataframe
             #df = pd.concat([df,ns],ignore_index=True)
             all_dfs.append(ns)
+
         df=pd.concat(all_dfs)
         return df
 
-    def attr_iter(home_team_name, away_team_name, home_team_attr, away_team_attr, queues,attr2):
-        #we are updating the queue however this will have an effect outside the function, as they are passed by reference=
-        pre_game_attr=np.mean(queues[attr2][home_team_name])
-        away_pre_game_attr=np.mean(queues[attr2][away_team_name])
-        queues[attr2][home_team_name].append(home_team_attr)
-        queues[attr2][away_team_name].append(away_team_attr)
-        return {'home_' + attr2 + '_pre_game':pre_game_attr, 'away_' + attr2 + '_pre_game':away_pre_game_attr}
+    @staticmethod
+    def attr_iter(home_team_name, away_team_name, home_team_attr, away_team_attr, queues, attr2,return_values=True, update=True):
+        #we are updating the queue however this will have an effect outside the function, as they are passed by reference
+        if update==True:
+            queues[attr2][home_team_name].append(home_team_attr)
+            queues[attr2][away_team_name].append(away_team_attr)
+        if return_values==True:
+            pre_game_attr = np.mean(queues[attr2][home_team_name])
+            away_pre_game_attr = np.mean(queues[attr2][away_team_name])
+            return {'home_' + attr2 + '_pre_game':pre_game_attr, 'away_' + attr2 + '_pre_game':away_pre_game_attr}
 
     @staticmethod
-    def go_through_season_apply(ns, new_attrs, queues):
-        ns = ns[ns['status'] == 'complete']
+    def go_through_season_apply(ns, new_attrs, queues,update_queues=True):
+        #ns = ns[ns['status'] == 'complete']
         #attr=('home_team_possession', 'away_team_possession', 'average_possession', 45, 38)
         #teams=queues[attr[2]]
-        Helpers.fill_up_promoted_teams(Helpers.get_promoted_teams(queues["total_goal_count"],ns),new_attrs,queues,38)
         for attr in new_attrs:
             #we insert two new columns, where we will insert the new data
-            ns.insert(len(ns.columns), 'home_' + attr[2] + '_pre_game', pd.Series())
-            ns.insert(len(ns.columns), 'away_' + attr[2] + '_pre_game', pd.Series())
+            ns.insert(len(ns.columns), 'home_' + attr[2] + '_pre_game', pd.Series)
+            ns.insert(len(ns.columns), 'away_' + attr[2] + '_pre_game', pd.Series)
             #normal attributes
             if not type(attr[0]) is list:
-                ns.loc[:,['home_' + attr[2] + '_pre_game','away_' + attr[2] + '_pre_game']] = ns.apply(lambda row: CreateDataset.attr_iter(row['home_team_name'],row['away_team_name'],row[attr[0]],row[attr[1]],queues,attr[2]),axis=1,result_type='expand')
+                ns.loc[:,['home_' + attr[2] + '_pre_game','away_' + attr[2] + '_pre_game']] = ns.apply(lambda row: CreateDataset.attr_iter(row['home_team_name'],row['away_team_name'],row[attr[0]],row[attr[1]],queues,attr[2],update=update_queues),axis=1,result_type='expand')
             #attributes that use some type of lambda function
             else:
                 lmbd=attr[5]
-                ns.loc[:, ['home_' + attr[2] + '_pre_game', 'away_' + attr[2] + '_pre_game']] = ns.apply(lambda row: CreateDataset.attr_iter(row['home_team_name'], row['away_team_name'], lmbd(row[attr[0][0]],row[attr[0][1]]), lmbd(row[attr[1][0]],row[attr[1][1]]), queues,attr[2]), axis=1, result_type='expand')
-        return ns,queues
+                ns.loc[:, ['home_' + attr[2] + '_pre_game', 'away_' + attr[2] + '_pre_game']] = \
+                    ns.apply(lambda row: \
+                                CreateDataset.attr_iter(row['home_team_name'], row['away_team_name'], lmbd(*[row[at] for at in attr[0]]), lmbd(*[row[at] for at in attr[1]]), queues,attr[2],update=update_queues),\
+                             axis=1, result_type='expand')
+        return ns
 
     def define_folder_sturcture(self,path=False):
         if path:
             self.data_location=path
         leagues_list=[]
-        for fl in os.listdir(self.data_location):
+        folders= [name for name in os.listdir(self.data_location) if os.path.isdir(os.path.join(self.data_location, name))]
+        for fl in folders:
             seasons=sorted(os.listdir(os.path.join(self.data_location,fl)))
             leagues_list.append([os.path.join(self.data_location,fl,s) for s in seasons])
         return leagues_list
 
-    def control_create_dataset(self):
+    def control_betting_accuracy(self):
+        ga=game_attributes()
+        for i in range(5,30,5):
+            ga.change_length(i)
+            self.data_location="classifier"
+            df=self.control_create_dataset(ga.attrs)
+            self.data_location="test"
+            predict_df=self.control_create_dataset(ga.attrs,"test")
+            acc=Helpers.betting_accuracy(df,predict_df)
+            print(f"{i} {acc}")
+
+
+    def control_create_dataset(self,attrs,name="classifier"):
         folder_structure=self.define_folder_sturcture()
         dfs=[]
         for seasons in folder_structure:
-            dfs.append(self.data_for_classifier(seasons[0],seasons[1:],game_attributes.attrs))
+            new_df=self.data_for_classifier(seasons[0],seasons[1:],attrs)
+            new_df["country"]=seasons[0].split("\\")[1]
+            dfs.append(new_df)
         df=pd.concat(dfs,ignore_index=True)
-        df.to_csv("classifier.csv")
+        df["results"]=df.apply(lambda x: "win" if x["home_team_goal_count"]>x["away_team_goal_count"] else "draw" if x["home_team_goal_count"]==x["away_team_goal_count"] else "loss",axis=1)
+        df.to_csv(name+".csv")
         return df
 
     def regression_test():
@@ -661,21 +840,36 @@ class CreateDataset(Helpers):
 #seasons=['classifier/italy-serie-a-matches-2015-to-2016-stats.csv','classifier/italy-serie-a-matches-2016-to-2017-stats.csv','classifier/italy-serie-a-matches-2017-to-2018-stats.csv']#if __name__ == '__main__':
 
 class game_attributes:
+
     attrs = []
-    attrs.append(('total_goal_count', 'total_goal_count', 'total_goal_count', 2.54, 38))
-    attrs.append(('home_team_goal_count', 'away_team_goal_count', 'goals_scored', 0.9, 38))
-    attrs.append(('away_team_goal_count', 'home_team_goal_count', 'goals_conceded', 1.5, 38))#The bundesliga does not have 38 TODO: change so the queues are adapted to length of season
-    attrs.append(('home_team_possession', 'away_team_possession', 'average_possession', 45, 38))
-    attrs.append(('total_goal_count', 'total_goal_count', 'total_goal_count_5games', 2.54, 5))
-    attrs.append(('home_team_shots', 'away_team_shots', 'average_shots', 6, 38))
-    attrs.append(('away_team_shots', 'home_team_shots', 'average_shots_against', 12, 38))
+    attrs.append(('total_goal_count', 'total_goal_count', 'total_goal_count', 2.54,False))
+    attrs.append(('home_team_goal_count', 'away_team_goal_count', 'goals_scored', 0.9,False))
+    attrs.append(('away_team_goal_count', 'home_team_goal_count', 'goals_conceded', 1.5,False))#The bundesliga does not have 38 TODO: change so the queues are adapted to length of season
+    attrs.append(('home_team_possession', 'away_team_possession', 'average_possession', 45,False))
+    attrs.append(('home_team_shots', 'away_team_shots', 'average_shots', 6,  False))
+    attrs.append(('away_team_shots', 'home_team_shots', 'average_shots_against', 12, False))
     lmbd_points = lambda x, y: 3 if x > y else 0 if x < y else 1
     ppg = (['home_team_goal_count', 'away_team_goal_count'],
-           ['away_team_goal_count', 'home_team_goal_count' ], 'ppg', 1, 38, lmbd_points)
+           ['away_team_goal_count', 'home_team_goal_count' ], 'ppg', 1, False, lmbd_points)
     attrs.append(ppg)
+    lmbd_points_per_odds = lambda x, y, z: 3*z if x > y else 0 if x < y else z
+    ppg_per_odds=(['home_team_goal_count', 'away_team_goal_count','odds_ft_home_team_win'],
+           ['away_team_goal_count', 'home_team_goal_count', 'odds_ft_away_team_win'], 'ppg_per_odds', 1, 3, lmbd_points_per_odds)
+    attrs.append(ppg_per_odds)
     ppg5 = (['home_team_goal_count', 'away_team_goal_count'],
             ['away_team_goal_count', 'home_team_goal_count'], 'ppg_5games', 1, 5, lmbd_points)
     attrs.append(ppg5)
+    attrs.append(('total_goal_count', 'total_goal_count', 'total_goal_count_5games', 2.54, 5))
+
+    def __init__(self):
+        self.attrs=[list(attr) for attr in game_attributes.attrs]
+
+
+    def change_length(self,number):
+        for attr in self.attrs[:-3]:
+            attr[4]=number
+
+
 
 
 
