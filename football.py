@@ -41,7 +41,7 @@ class PoissonModel:
     def __init__(self, home_dict={'home_team_name':'team', 'away_team_name':'opponent','home_team_goal_count':'goals'}, away_dict={'away_team_name':'team', 'home_team_name':'opponent','away_team_goal_count':'goals'}):
         self.home_dict=home_dict
         self.away_dict=away_dict
-        self.classes=["home_win","draw","away_win"]
+        self.classes_=["win","draw","away"]
 
     def fit(self,df):
         goal_model_data = pd.concat([
@@ -69,7 +69,7 @@ class PoissonModel:
             draw_prob=np.sum(np.diag(prob_matrix))
             a_prob=np.sum(np.triu(prob_matrix, 1))
             final_predictions.append([h_prob,draw_prob,a_prob])
-        return pd.DataFrame(final_predictions,columns=self.classes)
+        return pd.DataFrame(final_predictions,columns=self.classes_)
 
 class Helpers:
 
@@ -94,23 +94,19 @@ class Helpers:
         teams[x["away_team_name"]].append(1/x["odds_ft_away_team_win"]+1/x["odds_ft_home_team_win"]+1/x["odds_ft_draw"])
 
     @staticmethod
-    def betting_accuracy(df,predict_df):
-        clf = RandomForestClassifier(max_depth=2, random_state=0)
-        clf.fit(df.iloc[:, -21:-1], df.iloc[:, -1])
-        prob_df = pd.DataFrame(clf.predict_proba(predict_df.iloc[:, -21:-1]), columns=clf.classes_)
-        predict_df = pd.concat([predict_df, prob_df], axis=1)
+    def betting_accuracy(predict_df):
         predict_df[["bet_win", "bet_draw", "bet_away"]] = \
             predict_df.apply( \
                 lambda x: [x["win"] * (x["odds_ft_home_team_win"] - 1) - (1 - x["win"]), \
                            x["draw"] * (x["odds_ft_draw"] - 1) - (1 - x["draw"]), \
-                           x["loss"] * (x["odds_ft_away_team_win"] - 1) - (1 - x["loss"])], axis=1,
+                           x["away"] * (x["odds_ft_away_team_win"] - 1) - (1 - x["away"])], axis=1,
                 result_type="expand")
         max_ev = predict_df.iloc[:, -3:].max(axis=1)
         bet = predict_df.iloc[:, -3:].idxmax(axis=1)
         predict_df.insert(len(predict_df.columns), "max_ev", max_ev)
         predict_df.insert(len(predict_df.columns), "bet", bet)
         translate_dict = {"bet_win": ["win", "odds_ft_home_team_win"], "bet_draw": ["draw", "odds_ft_draw"],
-                          "bet_away": ["loss", "odds_ft_away_team_win"]}
+                          "bet_away": ["away", "odds_ft_away_team_win"]}
         predict_df["prob"] = predict_df.apply(lambda x: x[translate_dict[x["bet"]][0]], axis=1)
         predict_df["odds"] = predict_df.apply(lambda x: x[translate_dict[x["bet"]][1]], axis=1)
         predict_df["bet"] = predict_df.apply(lambda x: x["bet"].split("_")[1], axis=1)
